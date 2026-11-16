@@ -1,0 +1,168 @@
+{
+  "entities": {
+    "LearnerProfile": {
+      "title": "LearnerProfile",
+      "description": "Tracks a learner's language progress, difficulty level (easy/medium/hard), daily streak, custom streak goal, and certificate status for the Admin Panel.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$",
+          "description": "The authenticated user UID owning this learner record."
+        },
+        "displayName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80,
+          "description": "The learner's display name shown on their certificate and in the Admin Panel."
+        },
+        "nativeLangCode": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 16,
+          "description": "ISO code of the learner's native language."
+        },
+        "nativeLangName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 60,
+          "description": "Name of the learner's native language."
+        },
+        "targetLangCode": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 16,
+          "description": "ISO code of the target language being learned."
+        },
+        "targetLangName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 60,
+          "description": "Name of the target language being learned."
+        },
+        "difficultyLevel": {
+          "type": "string",
+          "enum": ["easy", "medium", "hard"],
+          "maxLength": 16,
+          "description": "Selected difficulty tier: easy, medium, or hard."
+        },
+        "currentStage": {
+          "type": "string",
+          "enum": ["ALPHABET_GAME", "WORDS_GAME", "CONVERSATION_GAME", "COMPLETED"],
+          "maxLength": 32,
+          "description": "Current learning stage."
+        },
+        "alphabetsCompleted": {
+          "type": "number",
+          "description": "Count of completed alphabet items."
+        },
+        "alphabetsTotal": {
+          "type": "number",
+          "description": "Total alphabet items in the curriculum."
+        },
+        "wordsCompleted": {
+          "type": "number",
+          "description": "Count of completed word items."
+        },
+        "wordsTotal": {
+          "type": "number",
+          "description": "Total word items in the curriculum."
+        },
+        "conversationsCompleted": {
+          "type": "number",
+          "description": "Count of completed conversation items."
+        },
+        "conversationsTotal": {
+          "type": "number",
+          "description": "Total conversation items in the curriculum."
+        },
+        "stars": {
+          "type": "number",
+          "description": "Total stars earned."
+        },
+        "streakDays": {
+          "type": "number",
+          "description": "Current daily learning streak in days."
+        },
+        "streakGoalDays": {
+          "type": "number",
+          "description": "Custom target streak goal set by the learner or admin."
+        },
+        "lastActiveDate": {
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 16,
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
+          "description": "YYYY-MM-DD date string of last learning activity."
+        },
+        "certificateEarned": {
+          "type": "boolean",
+          "description": "Whether the learner has unlocked their completion certificate."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when learner profile was created."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when learner profile was last updated."
+        }
+      },
+      "required": [
+        "uid",
+        "displayName",
+        "nativeLangCode",
+        "nativeLangName",
+        "targetLangCode",
+        "targetLangName",
+        "difficultyLevel",
+        "currentStage",
+        "alphabetsCompleted",
+        "alphabetsTotal",
+        "wordsCompleted",
+        "wordsTotal",
+        "conversationsCompleted",
+        "conversationsTotal",
+        "stars",
+        "streakDays",
+        "streakGoalDays",
+        "lastActiveDate",
+        "certificateEarned",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "AdminRecord": {
+      "title": "AdminRecord",
+      "description": "Trusted admin role marker document.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["uid", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/learners/{learnerId}": {
+      "schema": { "$ref": "#/entities/LearnerProfile" },
+      "description": "Stores each learner's progress, streak, difficulty level, and certificate status."
+    },
+    "/admins/{adminId}": {
+      "schema": { "$ref": "#/entities/AdminRecord" },
+      "description": "Stores trusted administrator UIDs."
+    }
+  }
+}

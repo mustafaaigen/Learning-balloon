@@ -1,0 +1,6 @@
+{
+  "name": "Balloony — Interactive Language Adventure",
+  "description": "A joyful 2D interactive language-learning game where children and beginners master world alphabets and first words through floating balloons and voice play.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

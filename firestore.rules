@@ -1,0 +1,188 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Pillar 1: Global Safety Net (Default-Deny Catch-All)
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Phase 3: Hardened Global Helpers
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isAdmin() {
+      return isVerifiedUser() && (
+        request.auth.token.email == 'tiktokautomation7861@gmail.com' ||
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+      );
+    }
+
+    // Pillar 2: Validation Blueprint for LearnerProfile
+    function isValidLearnerProfile(data) {
+      return data.keys().hasAll([
+        'uid',
+        'displayName',
+        'nativeLangCode',
+        'nativeLangName',
+        'targetLangCode',
+        'targetLangName',
+        'difficultyLevel',
+        'currentStage',
+        'alphabetsCompleted',
+        'alphabetsTotal',
+        'wordsCompleted',
+        'wordsTotal',
+        'conversationsCompleted',
+        'conversationsTotal',
+        'stars',
+        'streakDays',
+        'streakGoalDays',
+        'lastActiveDate',
+        'certificateEarned',
+        'createdAt',
+        'updatedAt'
+      ]) &&
+      data.keys().hasOnly([
+        'uid',
+        'displayName',
+        'nativeLangCode',
+        'nativeLangName',
+        'targetLangCode',
+        'targetLangName',
+        'difficultyLevel',
+        'currentStage',
+        'alphabetsCompleted',
+        'alphabetsTotal',
+        'wordsCompleted',
+        'wordsTotal',
+        'conversationsCompleted',
+        'conversationsTotal',
+        'stars',
+        'streakDays',
+        'streakGoalDays',
+        'lastActiveDate',
+        'certificateEarned',
+        'createdAt',
+        'updatedAt'
+      ]) &&
+      data.uid is string && data.uid.size() >= 1 && data.uid.size() <= 128 && data.uid.matches('^[a-zA-Z0-9_\\-]+$') &&
+      data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 80 &&
+      data.nativeLangCode is string && data.nativeLangCode.size() >= 2 && data.nativeLangCode.size() <= 16 &&
+      data.nativeLangName is string && data.nativeLangName.size() >= 1 && data.nativeLangName.size() <= 60 &&
+      data.targetLangCode is string && data.targetLangCode.size() >= 2 && data.targetLangCode.size() <= 16 &&
+      data.targetLangName is string && data.targetLangName.size() >= 1 && data.targetLangName.size() <= 60 &&
+      data.difficultyLevel is string && data.difficultyLevel.size() <= 16 && data.difficultyLevel in ['easy', 'medium', 'hard'] &&
+      data.currentStage is string && data.currentStage.size() <= 32 && data.currentStage in ['ALPHABET_GAME', 'WORDS_GAME', 'CONVERSATION_GAME', 'COMPLETED'] &&
+      data.alphabetsCompleted is int && data.alphabetsCompleted >= 0 && data.alphabetsCompleted <= 500 &&
+      data.alphabetsTotal is int && data.alphabetsTotal >= 1 && data.alphabetsTotal <= 500 &&
+      data.wordsCompleted is int && data.wordsCompleted >= 0 && data.wordsCompleted <= 500 &&
+      data.wordsTotal is int && data.wordsTotal >= 1 && data.wordsTotal <= 500 &&
+      data.conversationsCompleted is int && data.conversationsCompleted >= 0 && data.conversationsCompleted <= 500 &&
+      data.conversationsTotal is int && data.conversationsTotal >= 1 && data.conversationsTotal <= 500 &&
+      data.stars is int && data.stars >= 0 && data.stars <= 100000 &&
+      data.streakDays is int && data.streakDays >= 0 && data.streakDays <= 3650 &&
+      data.streakGoalDays is int && data.streakGoalDays >= 1 && data.streakGoalDays <= 365 &&
+      data.lastActiveDate is string && data.lastActiveDate.size() >= 8 && data.lastActiveDate.size() <= 16 && data.lastActiveDate.matches('^[0-9]{4}-[0-9]{2}-[0-9]{2}$') &&
+      data.certificateEarned is bool &&
+      data.createdAt is timestamp &&
+      data.updatedAt is timestamp;
+    }
+
+    function isValidAdminRecord(data) {
+      return data.keys().hasAll(['uid', 'createdAt']) &&
+        data.keys().hasOnly(['uid', 'createdAt']) &&
+        data.uid is string && data.uid.size() >= 1 && data.uid.size() <= 128 && data.uid.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.createdAt is timestamp;
+    }
+
+    // Collection: /learners/{learnerId}
+    match /learners/{learnerId} {
+      allow get: if isVerifiedUser() && isValidId(learnerId) && (
+        learnerId == request.auth.uid || (resource != null && existing().uid == request.auth.uid) || isAdmin()
+      );
+
+      allow list: if isVerifiedUser() && (
+        existing().uid == request.auth.uid || isAdmin()
+      );
+
+      allow create: if isVerifiedUser() &&
+        isValidId(learnerId) &&
+        isValidLearnerProfile(incoming()) &&
+        learnerId == request.auth.uid &&
+        incoming().uid == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+
+      allow update: if isVerifiedUser() &&
+        isValidId(learnerId) &&
+        isValidLearnerProfile(incoming()) &&
+        incoming().uid == existing().uid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          // Action 1: Learner updating their own learning progress, streak, difficulty, or certificate
+          (
+            learnerId == request.auth.uid &&
+            existing().uid == request.auth.uid &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'displayName',
+              'nativeLangCode',
+              'nativeLangName',
+              'targetLangCode',
+              'targetLangName',
+              'difficultyLevel',
+              'currentStage',
+              'alphabetsCompleted',
+              'alphabetsTotal',
+              'wordsCompleted',
+              'wordsTotal',
+              'conversationsCompleted',
+              'conversationsTotal',
+              'stars',
+              'streakDays',
+              'streakGoalDays',
+              'lastActiveDate',
+              'certificateEarned',
+              'updatedAt'
+            ])
+          ) ||
+          // Action 2: Admin escape hatch to adjust learner streak goal, streak, level, or certificate
+          isAdmin()
+        );
+
+      allow delete: if isVerifiedUser() && isValidId(learnerId) && isAdmin();
+    }
+
+    // Collection: /admins/{adminId}
+    match /admins/{adminId} {
+      allow get: if isVerifiedUser() && isValidId(adminId) && (
+        request.auth.uid == adminId || isAdmin()
+      );
+      allow list: if false;
+      allow create: if isVerifiedUser() &&
+        isValidId(adminId) &&
+        isValidAdminRecord(incoming()) &&
+        incoming().uid == adminId &&
+        incoming().createdAt == request.time &&
+        isAdmin();
+      allow update: if false;
+      allow delete: if isVerifiedUser() && isValidId(adminId) && isAdmin();
+    }
+  }
+}
