@@ -5,6 +5,8 @@ import {
   getAuth,
   GoogleAuthProvider,
   signInWithPopup,
+  signInWithRedirect,
+  getRedirectResult,
   signInWithCredential,
   signOut,
   onAuthStateChanged as firebaseOnAuthStateChanged,
@@ -451,6 +453,95 @@ export function getYesterdayDateString(): string {
   return `${y}-${m}-${d}`;
 }
 
+const PENDING_GOOGLE_REDIRECT_SCREEN_KEY = 'balloony_pending_google_redirect_v1';
+
+export function isEmbeddedInAppBrowser(): boolean {
+  if (typeof navigator === 'undefined') return false;
+  const ua = navigator.userAgent || '';
+  return /FBAN|FBAV|Instagram|WhatsApp|Line\/|MicroMessenger|BytedanceWebview|musical_ly|TikTok|Snapchat|;\s*wv\)/i.test(
+    ua
+  );
+}
+
+export function isMobileOrTabletBrowser(): boolean {
+  if (typeof navigator === 'undefined') return false;
+  return /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(
+    navigator.userAgent || ''
+  );
+}
+
+function isTopLevelWindow(): boolean {
+  if (typeof window === 'undefined') return false;
+  try {
+    return window.self === window.top;
+  } catch {
+    return false;
+  }
+}
+
+export interface RedirectSignInOutcome {
+  user: User | null;
+  returnScreen: string | null;
+  error?: any;
+}
+
+let cachedRedirectPromise: Promise<RedirectSignInOutcome> | null = null;
+
+export function consumeGoogleRedirectSignInResult(): Promise<RedirectSignInOutcome> {
+  if (typeof window === 'undefined') {
+    return Promise.resolve({ user: null, returnScreen: null });
+  }
+  if (cachedRedirectPromise) return cachedRedirectPromise;
+
+  cachedRedirectPromise = (async () => {
+    let savedReturnScreen: string | null = null;
+    try {
+      savedReturnScreen = sessionStorage.getItem(PENDING_GOOGLE_REDIRECT_SCREEN_KEY);
+    } catch {}
+
+    try {
+      const res = await getRedirectResult(auth);
+      try {
+        if (savedReturnScreen) {
+          sessionStorage.removeItem(PENDING_GOOGLE_REDIRECT_SCREEN_KEY);
+        }
+      } catch {}
+      if (res?.user && res.user.email) {
+        completeGoogleSignInToLearningBalloon({
+          email: res.user.email,
+          displayName: res.user.displayName || undefined,
+          photoURL: res.user.photoURL || undefined,
+        });
+        return {
+          user: res.user,
+          returnScreen: savedReturnScreen,
+        };
+      }
+      return {
+        user: null,
+        returnScreen: savedReturnScreen,
+      };
+    } catch (err: any) {
+      try {
+        if (savedReturnScreen) {
+          sessionStorage.removeItem(PENDING_GOOGLE_REDIRECT_SCREEN_KEY);
+        }
+      } catch {}
+      return {
+        user: null,
+        returnScreen: savedReturnScreen,
+        error: err,
+      };
+    }
+  })();
+
+  return cachedRedirectPromise;
+}
+
+if (typeof window !== 'undefined') {
+  consumeGoogleRedirectSignInResult().catch(() => {});
+}
+
 let gsiScriptLoadPromise: Promise<void> | null = null;
 let preferOfficialGsiPopup = false;
 
@@ -572,10 +663,17 @@ async function signInWithOfficialGoogleGsiPopup(): Promise<User | null> {
         }
       },
       error_callback: (err: any) => {
+        const errType = String(err?.type || '');
         const closedErr: any = new Error(
-          err?.message || 'Google Sign-In window closed.'
+          err?.message ||
+            (errType === 'popup_failed_to_open'
+              ? 'Popup window was blocked by your mobile browser.'
+              : 'Google Sign-In window closed.')
         );
-        closedErr.code = 'auth/popup-closed-by-user';
+        closedErr.code =
+          errType === 'popup_failed_to_open'
+            ? 'auth/popup-blocked'
+            : 'auth/popup-closed-by-user';
         reject(closedErr);
       },
     });
@@ -584,18 +682,34 @@ async function signInWithOfficialGoogleGsiPopup(): Promise<User | null> {
   });
 }
 
-export async function signInWithGooglePopup(): Promise<User | null> {
-  if (preferOfficialGsiPopup && (firebaseConfig as any).oAuthClientId) {
+export async function signInWithGooglePopup(
+  returnScreenAfterRedirect?: string
+): Promise<User | null> {
+  if (isEmbeddedInAppBrowser()) {
+    const webviewErr: any = new Error(
+      'Google Sign-In is blocked inside in-app browsers (WhatsApp/Instagram/TikTok). Please open this link in Chrome or Safari.'
+    );
+    webviewErr.code = 'auth/embedded-webview';
+    throw webviewErr;
+  }
+
+  const provider = new GoogleAuthProvider();
+  provider.addScope('profile');
+  provider.addScope('email');
+  provider.setCustomParameters({
+    prompt: 'select_account',
+  });
+
+  if (
+    preferOfficialGsiPopup &&
+    !isTopLevelWindow() &&
+    (firebaseConfig as any).oAuthClientId
+  ) {
     return signInWithOfficialGoogleGsiPopup();
   }
 
+  const attemptStartMs = Date.now();
   try {
-    const provider = new GoogleAuthProvider();
-    provider.addScope('profile');
-    provider.addScope('email');
-    provider.setCustomParameters({
-      prompt: 'select_account',
-    });
     const res = await signInWithPopup(auth, provider);
     if (res.user && res.user.email) {
       completeGoogleSignInToLearningBunny({
@@ -607,13 +721,53 @@ export async function signInWithGooglePopup(): Promise<User | null> {
     return res.user;
   } catch (err: any) {
     const code = String(err?.code || '');
+    const elapsed = Date.now() - attemptStartMs;
+
+    // 1. Unauthorized deployed domain: surface exact domain so it can be allowlisted cleanly
+    if (code === 'auth/unauthorized-domain') {
+      const host =
+        typeof window !== 'undefined' ? window.location.hostname : '';
+      const domainErr: any = new Error(
+        `This deployed domain (${host}) is not added in Firebase Auth Authorized Domains.`
+      );
+      domainErr.code = 'auth/unauthorized-domain';
+      domainErr.unauthorizedHost = host;
+      throw domainErr;
+    }
+
+    // 2. Deployed / standalone mobile or desktop window where popup failed or was blocked -> use native full-page Google redirect!
+    const shouldUseRedirectFallback =
+      isTopLevelWindow() &&
+      (code === 'auth/popup-blocked' ||
+        code === 'auth/operation-not-supported-in-this-environment' ||
+        code === 'auth/web-storage-unsupported' ||
+        code === 'auth/internal-error' ||
+        (isMobileOrTabletBrowser() &&
+          (code === 'auth/popup-closed-by-user' ||
+            code === 'auth/cancelled-popup-request') &&
+          elapsed < 1200));
+
+    if (shouldUseRedirectFallback) {
+      try {
+        if (typeof window !== 'undefined' && returnScreenAfterRedirect) {
+          sessionStorage.setItem(
+            PENDING_GOOGLE_REDIRECT_SCREEN_KEY,
+            returnScreenAfterRedirect
+          );
+        }
+      } catch {}
+      await signInWithRedirect(auth, provider);
+      return null;
+    }
+
     if (
       code === 'auth/popup-closed-by-user' ||
       code === 'auth/cancelled-popup-request'
     ) {
       throw err;
     }
-    if ((firebaseConfig as any).oAuthClientId) {
+
+    if (!isTopLevelWindow() && (firebaseConfig as any).oAuthClientId) {
       preferOfficialGsiPopup = true;
       return signInWithOfficialGoogleGsiPopup();
     }

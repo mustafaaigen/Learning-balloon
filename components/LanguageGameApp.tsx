@@ -67,6 +67,7 @@ import {
   BOOTSTRAPPED_ADMIN_EMAIL,
   isUserAdmin,
   signInWithGooglePopup,
+  consumeGoogleRedirectSignInResult,
   signOutLearner,
   getTodayDateString,
   getYesterdayDateString,
@@ -198,6 +199,11 @@ export default function LanguageGameApp({
   const [completionDate, setCompletionDate] = useState<string>(getTodayDateString());
   const [hasCompletedOnboarding, setHasCompletedOnboarding] = useState<boolean>(false);
   const [onboardingError, setOnboardingError] = useState<string>('');
+  const [authIssueDetails, setAuthIssueDetails] = useState<{
+    kind: 'unauthorized-domain' | 'embedded-webview';
+    host?: string;
+  } | null>(null);
+  const [authIssueCopied, setAuthIssueCopied] = useState<boolean>(false);
   const [isSigningInGoogle, setIsSigningInGoogle] = useState<boolean>(false);
   const [difficultyLevel, setDifficultyLevel] = useState<DifficultyLevel>('easy');
   const [streakDays, setStreakDays] = useState<number>(1);
@@ -675,8 +681,17 @@ export default function LanguageGameApp({
           }
         } catch {}
 
-        // Show the 5-Step Onboarding Wizard whenever onboarding is not completed (first visit or after Sign Out)
-        if (!onboardingDone) {
+        // Show the 5-Step Onboarding Wizard whenever onboarding is not completed (unless returning from Google redirect)
+        let pendingRedirectScreen: string | null = null;
+        try {
+          pendingRedirectScreen = sessionStorage.getItem(
+            'balloony_pending_google_redirect_v1'
+          );
+        } catch {}
+
+        if (pendingRedirectScreen === 'AUTH_ONBOARDING') {
+          setScreen('AUTH_ONBOARDING');
+        } else if (!onboardingDone) {
           setLangModalInitialStep('native');
           setScreen('LANGUAGE_SELECT');
         } else {
@@ -727,9 +742,49 @@ export default function LanguageGameApp({
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [currentUser]);
 
-  // Listen to Firebase Auth state for Cloud Learner Tracking & Admin Panel
+  // Listen to Firebase Auth state for Cloud Learner Tracking & Admin Panel + handle mobile Google redirect return
   const lastAutoFilledUidRef = useRef<string | null>(null);
   useEffect(() => {
+    let active = true;
+    consumeGoogleRedirectSignInResult().then((outcome) => {
+      if (!active) return;
+      if (outcome.user) {
+        setCurrentUser(outcome.user);
+        setAuthIssueDetails(null);
+        setOnboardingError('');
+        if (outcome.user.displayName) {
+          setLearnerName((prev) => (!prev.trim() ? outcome.user!.displayName! : prev));
+        }
+        const adminMatch = isUserAdmin(outcome.user);
+        setAdminCommandUnlocked(adminMatch);
+        if (outcome.returnScreen === 'AUTH_ONBOARDING') {
+          setScreen('AUTH_ONBOARDING');
+        }
+      } else if (outcome.error) {
+        if (outcome.returnScreen === 'AUTH_ONBOARDING') {
+          setScreen('AUTH_ONBOARDING');
+        }
+        const errCode = String(outcome.error?.code || '');
+        if (errCode === 'auth/unauthorized-domain') {
+          const host =
+            typeof window !== 'undefined' ? window.location.hostname : '';
+          setAuthIssueDetails({ kind: 'unauthorized-domain', host });
+          setOnboardingError(
+            nativeLang.code === 'ur'
+              ? `ڈومین "${host}" کو Firebase Console → Authentication → Settings → Authorized domains میں شامل کریں۔`
+              : nativeLang.code === 'hi'
+              ? `डोमेन "${host}" को Firebase Console → Authentication → Settings → Authorized domains में जोड़ें।`
+              : `Add "${host}" to Firebase Console → Authentication → Settings → Authorized domains to enable Google Sign-In here.`
+          );
+        } else if (errCode !== 'auth/popup-closed-by-user') {
+          setOnboardingError(
+            outcome.error?.message ||
+              'Could not complete Google Sign-In. Please try again.'
+          );
+        }
+      }
+    });
+
     const unsubscribe = onAuthStateChanged(auth, (user) => {
       setCurrentUser(user);
       if (user?.uid && user.uid !== lastAutoFilledUidRef.current) {
@@ -750,8 +805,11 @@ export default function LanguageGameApp({
         );
       }
     });
-    return () => unsubscribe();
-  }, []);
+    return () => {
+      active = false;
+      unsubscribe();
+    };
+  }, [nativeLang.code]);
 
   // 100% Automatic Streak Watcher: checks date rollover on tab focus & every 60s and auto-scales streakGoalDays
   useEffect(() => {
@@ -995,9 +1053,11 @@ export default function LanguageGameApp({
 
   const handleOfficialGoogleSignIn = useCallback(async () => {
     setOnboardingError('');
+    setAuthIssueDetails(null);
+    setAuthIssueCopied(false);
     setIsSigningInGoogle(true);
     try {
-      const signedInUser = await signInWithGooglePopup();
+      const signedInUser = await signInWithGooglePopup(screen);
       if (signedInUser) {
         setCurrentUser(signedInUser);
         if (signedInUser.displayName) {
@@ -1007,7 +1067,9 @@ export default function LanguageGameApp({
         setAdminCommandUnlocked(adminMatch);
         if (!adminMatch) {
           setHubModalTab((prevTab) =>
-            prevTab === 'admin' ? 'streak_level' : prevTab
+            prevTab === 'admin' || prevTab === 'analytics'
+              ? 'streak_level'
+              : prevTab
           );
         }
       }
@@ -1019,6 +1081,31 @@ export default function LanguageGameApp({
       ) {
         return;
       }
+      if (code === 'auth/embedded-webview') {
+        setAuthIssueDetails({ kind: 'embedded-webview' });
+        setOnboardingError(
+          nativeLang.code === 'ur'
+            ? 'WhatsApp / TikTok / Instagram کے اندرونی براؤزر میں Google Sign-In بند ہے۔ اوپر کونے سے "Open in Chrome / Safari" پر کلک کریں۔'
+            : nativeLang.code === 'hi'
+            ? 'WhatsApp / TikTok / Instagram के इन-ऐप ब्राउज़र में Google Sign-In ब्लॉक है। कृपया इसे Chrome या Safari में खोलें।'
+            : 'Google blocks Sign-In inside in-app browsers (WhatsApp/Instagram/TikTok). Please open this website in Chrome or Safari.'
+        );
+        return;
+      }
+      if (code === 'auth/unauthorized-domain') {
+        const host =
+          err?.unauthorizedHost ||
+          (typeof window !== 'undefined' ? window.location.hostname : '');
+        setAuthIssueDetails({ kind: 'unauthorized-domain', host });
+        setOnboardingError(
+          nativeLang.code === 'ur'
+            ? `ڈومین "${host}" ابھی Firebase Authorized Domains میں شامل نہیں ہے۔ نیچے سے ڈومین کاپی کر کے Firebase Console میں شامل کریں۔`
+            : nativeLang.code === 'hi'
+            ? `डोमेन "${host}" अभी Firebase Authorized Domains में नहीं है। नीचे से कॉपी करके Firebase Console में जोड़ें।`
+            : `Deployed domain "${host}" is not authorized yet. Copy it below and add it in Firebase Console → Authentication → Settings → Authorized domains.`
+        );
+        return;
+      }
       setOnboardingError(
         err?.message ||
           'Could not open the official Google Sign-In window. Please allow popups and try again.'
@@ -1026,11 +1113,12 @@ export default function LanguageGameApp({
     } finally {
       setIsSigningInGoogle(false);
     }
-  }, []);
+  }, [nativeLang.code, screen]);
 
   const handleGoogleSignOut = useCallback(async () => {
     stopCurrentListeningAttempt();
     setOnboardingError('');
+    setAuthIssueDetails(null);
     setHasCompletedOnboarding(false);
     setHasSavedLangs(false);
     setAdminCommandUnlocked(false);
@@ -3198,8 +3286,45 @@ export default function LanguageGameApp({
                   </div>
 
                   {onboardingError && (
-                    <div className="mb-3 p-2.5 rounded-xl bg-rose-500/20 border border-rose-400 text-rose-500 dark:text-rose-300 text-xs font-extrabold text-center">
-                      {onboardingError}
+                    <div className="mb-3 p-3 rounded-2xl bg-rose-500/15 border border-rose-400/70 text-rose-500 dark:text-rose-300 text-xs font-extrabold text-center space-y-2">
+                      <div>{onboardingError}</div>
+                      {authIssueDetails && (
+                        <div className="flex flex-wrap items-center justify-center gap-2 pt-1">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const textToCopy =
+                                authIssueDetails.kind === 'unauthorized-domain'
+                                  ? authIssueDetails.host ||
+                                    (typeof window !== 'undefined'
+                                      ? window.location.hostname
+                                      : '')
+                                  : typeof window !== 'undefined'
+                                  ? window.location.href
+                                  : '';
+                              if (textToCopy && navigator.clipboard) {
+                                navigator.clipboard
+                                  .writeText(textToCopy)
+                                  .then(() => {
+                                    setAuthIssueCopied(true);
+                                    setTimeout(
+                                      () => setAuthIssueCopied(false),
+                                      2500
+                                    );
+                                  })
+                                  .catch(() => {});
+                              }
+                            }}
+                            className="px-3 py-1.5 rounded-full bg-rose-600 hover:bg-rose-500 text-white text-[11px] font-bold cursor-pointer shadow-xs"
+                          >
+                            {authIssueCopied
+                              ? '✓ Copied!'
+                              : authIssueDetails.kind === 'unauthorized-domain'
+                              ? `📋 Copy Domain (${authIssueDetails.host})`
+                              : '📋 Copy Link for Chrome / Safari'}
+                          </button>
+                        </div>
+                      )}
                     </div>
                   )}
 
